@@ -1,0 +1,23 @@
+# .gitignore - Protège les clés et fichiers sensibles
+
+# Fichier de configuration avec les tokens
+.env
+.env.local
+.env.production
+
+# Node_modules
+node_modules/
+
+# Fichiers de log
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

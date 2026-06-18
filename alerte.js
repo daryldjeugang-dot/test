@@ -1,191 +1,130 @@
 
-
 const https = require('https');
-const http = require('http');
+const fs = require('fs');
+const path = require('path');
 
-     // 5 minutes (en millisecondes)
-
-// URL de l'API
-const API_URL = '/api/v1/exam/schedule?lang=fr';
-const API_HOST = 'api.testslanguesub.com';
-
-// ===== CODE - NE PAS MODIFIER =====
-let detectionCount = 0;
-let alreadyAlerted = false;
-
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+// ===== CHARGEMENT DE LA CONFIGURATION DEPUIS .env =====
+function loadEnv() {
+    const envPath = path.join(__dirname, '.env');
+    if (fs.existsSync(envPath)) {
+        const content = fs.readFileSync(envPath, 'utf8');
+        content.split('\n').forEach(line => {
+            const trimmed = line.trim();
+            if (trimmed && !trimmed.startsWith('#')) {
+                const [key, ...vals] = trimmed.split('=');
+                const value = vals.join('=').trim();
+                // Enlever les guillemets si présents
+                process.env[key.trim()] = value.replace(/^["']|["']$/g, '');
+            }
+        });
+        console.log('✅ Configuration chargée depuis .env');
+    } else {
+        console.log('⚠️ Fichier .env non trouvé, utilisation des variables d\'environnement');
+    }
 }
 
-function apiRequest(path, host) {
+loadEnv();
+
+// ===== CONFIGURATION (via variables d'environnement) =====
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const CHECK_INTERVAL = parseInt(process.env.CHECK_INTERVAL) || 5 * 60 * 1000;
+
+// Vérification que les clés sont présentes
+if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
+    console.error('❌ ERREUR : TELEGRAM_BOT_TOKEN et TELEGRAM_CHAT_ID doivent être définis');
+    console.error('   Crée un fichier .env à côté de ce script avec :');
+    console.error('   TELEGRAM_BOT_TOKEN=ton_token');
+    console.error('   TELEGRAM_CHAT_ID=ton_chat_id');
+    process.exit(1);
+}
+
+const API_OPTIONS = {
+    hostname: 'api.testslanguesub.com',
+    path: '/api/v1/exam/schedule?lang=fr',
+    method: 'GET',
+    headers: { 'Accept': 'application/json', 'User-Agent': 'Node.js' },
+    timeout: 15000
+};
+
+let alreadyAlerted = false;
+let count = 0;
+
+function apiRequest() {
     return new Promise((resolve, reject) => {
-        const options = {
-            hostname: host,
-            path: path,
-            method: 'GET',
-            headers: {
-                'Accept': 'application/json',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            },
-            timeout: 15000
-        };
-        
-        const req = https.request(options, (res) => {
+        const req = https.request(API_OPTIONS, res => {
             let data = '';
-            res.on('data', chunk => data += chunk);
-            res.on('end', () => {
-                try {
-                    resolve(JSON.parse(data));
-                } catch(e) {
-                    reject(new Error(`JSON parse error: ${data.substring(0,200)}`));
-                }
-            });
+            res.on('data', c => data += c);
+            res.on('end', () => { try { resolve(JSON.parse(data)); } catch(e) { reject(e); } });
         });
-        
         req.on('error', reject);
         req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
         req.end();
     });
 }
 
-function sendTelegramMessage(message) {
-    return new Promise((resolve, reject) => {
-        const text = encodeURIComponent(message);
-        const path = `/bot${TELEGRAM_TOKEN}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&text=${text}&parse_mode=HTML`;
-        
-        const options = {
-            hostname: 'api.telegram.org',
-            path: path,
-            method: 'GET',
-            timeout: 10000
-        };
-        
-        const req = https.request(options, (res) => {
+function sendTelegram(text) {
+    const t = encodeURIComponent(text);
+    return new Promise((resolve) => {
+        https.get(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&text=${t}&parse_mode=HTML`, (res) => {
             let data = '';
-            res.on('data', chunk => data += chunk);
-            res.on('end', () => {
-                try {
-                    resolve(JSON.parse(data));
-                } catch(e) {
-                    resolve({ ok: false });
-                }
-            });
+            res.on('data', c => data += c);
+            res.on('end', () => resolve(data));
         });
-        
-        req.on('error', reject);
-        req.on('timeout', () => { req.destroy(); reject(new Error('Timeout Telegram')); });
-        req.end();
     });
 }
 
-async function checkTCF() {
-    detectionCount++;
+async function check() {
+    count++;
     const now = new Date().toLocaleString('fr-FR', { timeZone: 'Africa/Douala' });
-    
-    console.log(`\n[${now}] 🔍 Vérification #${detectionCount}...`);
+    console.log(`[${now}] Vérif #${count}...`);
     
     try {
-        const data = await apiRequest(API_URL, API_HOST);
-        const exams = data.data || data.exams || data || [];
+        const data = await apiRequest();
+        const exams = data.data || [];
+        console.log(`   ${exams.length} examens listés`);
         
-        if (!Array.isArray(exams)) {
-            console.log(`   ⚠️ Format inattendu, recherche dans l'objet...`);
-            // Chercher dans toutes les clés
-            for (const key of Object.keys(data)) {
-                if (Array.isArray(data[key])) {
-                    console.log(`   → Tableau trouvé dans '${key}' (${data[key].length} éléments)`);
-                }
-            }
-            return;
-        }
+        const tcf = exams.filter(e => (e.exam_type?.name || '').toLowerCase().includes('tcf'));
         
-        console.log(`   📊 ${exams.length} examen(s) listé(s)`);
-        
-        // Chercher TCF (peu importe le format du nom)
-        const tcfExams = exams.filter(e => {
-            const name = (e.exam_type?.name || e.name || e.exam_type || '').toString().toLowerCase();
-            return name.includes('tcf') || name.includes('test de connaissance');
-        });
-        
-        if (tcfExams.length > 0) {
-            console.log(`   🎉 TCF TROUVÉ ! ${tcfExams.length} session(s)`);
+        if (tcf.length > 0 && !alreadyAlerted) {
+            alreadyAlerted = true;
+            let details = tcf.map((e, i) => 
+                `\n📌 Session ${i+1}: ${e.exam_type?.name}\n   Date: ${e.exam_date}\n   Places: ${e.available_seat}/${e.max_capacity}\n   Lieu: ${e.venue || 'N/A'}\n   Limite: ${e.registration_deadline || 'N/A'}`
+            ).join('');
             
-            if (!alreadyAlerted) {
-                alreadyAlerted = true;
-                
-                let details = '';
-                tcfExams.forEach((exam, i) => {
-                    const type = exam.exam_type?.name || exam.name || 'TCF';
-                    const date = exam.exam_date || exam.date || 'N/A';
-                    const places = `${exam.available_seat || '?'}/${exam.max_capacity || '?'}`;
-                    const venue = exam.venue || exam.location || 'N/A';
-                    const deadline = exam.registration_deadline || 'N/A';
-                    details += `\n📌 <b>Session ${i+1}</b>`;
-                    details += `\n   Type: ${type}`;
-                    details += `\n   Date examen: ${date}`;
-                    details += `\n   Limite inscription: ${deadline}`;
-                    details += `\n   Places: ${places}`;
-                    details += `\n   Lieu: ${venue}\n`;
-                });
-                
-                const message = `
-🚨 <b>🔴🔴 TCF-CANADA DISPONIBLE ! 🔴🔴</b>
-
-Les examens TCF sont maintenant ouverts à l'inscription sur la plateforme de l'Université de Buea !
-
-${details}
-
-<a href="https://testslanguesub.com/fr/dashboard/exam-registration">🔗 Clique ici pour t'inscrire</a>
-
-⚠️ <b>Agis vite !</b> Les places sont limitées !
-Détecté le : ${now}
-                `.trim();
-                
-                console.log(`   📧 Envoi de l'alerte Telegram...`);
-                const result = await sendTelegramMessage(message);
-                
-                if (result.ok) {
-                    console.log(`   ✅ ALERTE ENVOYÉE avec succès !`);
-                } else {
-                    console.log(`   ⚠️ Erreur envoi Telegram:`, result);
-                }
-            } else {
-                console.log(`   ⏳ Déjà alerté, pas de nouvel envoi`);
-            }
+            const msg = `🚨 <b>TCF-CANADA DISPONIBLE !</b>\n\nLes sessions TCF sont ouvertes sur la plateforme !${details}\n\n<a href="https://testslanguesub.com/fr/dashboard/exam-registration">🔗 S'inscrire maintenant</a>\n\nDétecté le ${now}`;
+            
+            console.log('   📨 Envoi alerte Telegram...');
+            await sendTelegram(msg);
+            console.log('   ✅ ALERTE ENVOYÉE !');
+        } else if (tcf.length > 0) {
+            console.log('   ✅ TCF présent (déjà alerté)');
         } else {
-            console.log(`   ❌ Aucun TCF trouvé`);
-            // Lister les examens disponibles
-            exams.slice(0, 5).forEach(e => {
-                const name = e.exam_type?.name || e.name || 'Inconnu';
-                console.log(`   → ${name}`);
-            });
+            console.log('   ❌ Pas de TCF trouvé');
         }
-        
-    } catch (error) {
-        console.log(`   ❌ Erreur: ${error.message}`);
+    } catch(e) {
+        console.log('   ❌ Erreur:', e.message);
     }
 }
 
-// ===== LANCEMENT =====
-console.log(`
-╔══════════════════════════════════════╗
-║   🔍 ALERTEUR TCF-CANADA BUEA       ║
-║   Université de Buea                 ║
-║                                      ║
-║   Surveillance toutes les ${CHECK_INTERVAL/60000} minutes     ║
-║   Alerte via Telegram                ║
-╚══════════════════════════════════════╝
+// ===== AFFICHAGE DU STATUT =====
+console.log('');
+console.log('╔══════════════════════════════════════╗');
+console.log('║   🔍 ALERTEUR TCF-CANADA BUEA       ║');
+console.log('║   Université de Buea                 ║');
+console.log('║                                      ║');
+console.log(`║   Intervalle : ${CHECK_INTERVAL/60000} minutes              ║`);
+console.log('║   Alerte : Telegram                  ║');
+console.log('╚══════════════════════════════════════╝');
+console.log('');
 
-Configuration :
-• Token Telegram : ${TELEGRAM_TOKEN.substring(0,10)}...
-• Chat ID : ${TELEGRAM_CHAT_ID}
-• API : ${API_HOST}${API_URL}
+// Sécurité : ne pas afficher le token complet
+const maskedToken = TELEGRAM_TOKEN ? TELEGRAM_TOKEN.substring(0, 6) + '...' + TELEGRAM_TOKEN.slice(-4) : 'NON DÉFINI';
+console.log(`📧 Bot Telegram: ${maskedToken}`);
+console.log(`👤 Chat ID: ${TELEGRAM_CHAT_ID}`);
+console.log(`⏱ Vérification toutes les ${CHECK_INTERVAL/1000} secondes`);
+console.log('');
 
-Démarrage de la surveillance...
-`);
-
-// Vérification immédiate
-checkTCF();
-
-// Puis périodiquement
-setInterval(checkTCF, CHECK_INTERVAL);
+// Lancement
+check();
+setInterval(check, CHECK_INTERVAL);
