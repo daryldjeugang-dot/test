@@ -3,10 +3,7 @@
 const https = require('https');
 const http = require('http');
 
-
-const TELEGRAM_TOKEN = '8828881998:AAGub4FHDhw55hM-1bWHHIowQvsF4sDgZQQ';       // De @BotFather
-const TELEGRAM_CHAT_ID = '5771575803';        // De @userinfobot
-const CHECK_INTERVAL = 5 * 60 * 1000;         // 5 minutes (en millisecondes)
+     // 5 minutes (en millisecondes)
 
 // URL de l'API
 const API_URL = '/api/v1/exam/schedule?lang=fr';
