@@ -1,0 +1,11 @@
+{
+  "name": "tcf-alerteur-buea",
+  "version": "1.0.0",
+  "description": "Alerteur TCF-Canada - Université de Buea",
+  "main": "alerteur.js",
+  "scripts": {
+    "start": "node alerteur.js"
+  },
+  "author": "",
+  "license": "MIT"
+}
